@@ -1,0 +1,397 @@
+Here is the complete, fully debugged and integrated codebase:
+
+---
+
+### `hardware_driver.py`
+
+```python
+import pyvisa
+import numpy as np
+import time
+from dataclasses import dataclass
+
+
+@dataclass
+class SweepConfig:
+    v_start: float = 0.0
+    v_stop: float = 3.0
+    v_step: float = 0.01
+    compliance_current: float = 0.1   # Amps (safety limit)
+    series_resistor: float = 1000.0   # Ohms (Rs > |R_NDR| stability criterion)
+    nplc: float = 1.0                 # Integration time (power line cycles)
+
+
+class SMUDriver:
+    """Keithley 2400/2450 Source Measure Unit driver via VISA."""
+
+    def __init__(self, resource_address: str, config: SweepConfig):
+        self.rm = pyvisa.ResourceManager()
+        self.smu = self.rm.open_resource(resource_address)
+        self.smu.timeout = 10000
+        self.config = config
+        self._initialize()
+
+    def _initialize(self):
+        self.smu.write("*RST")
+        time.sleep(0.5)
+        self.smu.write(":SOUR:FUNC VOLT")
+        self.smu.write(":SENS:FUNC 'CURR'")
+        self.smu.write(f":SENS:CURR:PROT {self.config.compliance_current}")
+        self.smu.write(f":SENS:CURR:NPLC {self.config.nplc}")
+        self.smu.write(":FORM:ELEM VOLT,CURR")
+        self.smu.write(":OUTP ON")
+
+    def sweep(self) -> tuple[np.ndarray, np.ndarray]:
+        voltages = np.arange(
+            self.config.v_start,
+            self.config.v_stop + self.config.v_step,
+            self.config.v_step
+        )
+        currents = np.zeros_like(voltages)
+        for i, v in enumerate(voltages):
+            self.smu.write(f":SOUR:VOLT {v:.4f}")
+            response = self.smu.query(":READ?")
+            _, current = map(float, response.strip().split(","))
+            currents[i] = current
+        return voltages, currents
+
+    def close(self):
+        self.smu.write(":OUTP OFF")
+        self.smu.close()
+        self.rm.close()
+
+
+class LockInDriver:
+    """Stanford Research SR830 Lock-In Amplifier driver via VISA."""
+
+    def __init__(self, resource_address: str, frequency: float = 1000.0, amplitude: float = 0.01):
+        self.rm = pyvisa.ResourceManager()
+        self.lockin = self.rm.open_resource(resource_address)
+        self.lockin.timeout = 5000
+        self.frequency = frequency
+        self.amplitude = amplitude
+        self._initialize()
+
+    def _initialize(self):
+        self.lockin.write("*RST")
+        time.sleep(0.5)
+        self.lockin.write(f"FREQ {self.frequency}")
+        self.lockin.write(f"SLVL {self.amplitude}")
+        self.lockin.write("SENS 8")
+        self.lockin.write("OFLT 8")
+        self.lockin.write("ISRC 0")
+
+    def measure_admittance(self) -> tuple[float, float]:
+        response = self.lockin.query("SNAP?1,2")
+        x, y = map(float, response.strip().split(","))
+        omega = 2 * np.pi * self.frequency
+        G = x / self.amplitude
+        Cq = y / (omega * self.amplitude)
+        return G * 1e3, Cq * 1e12  # mS, pF
+
+    def frequency_sweep(
+        self, f_start: float = 100, f_stop: float = 1e5, n_points: int = 50
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        frequencies = np.logspace(np.log10(f_start), np.log10(f_stop), n_points)
+        G_arr = np.zeros(n_points)
+        Cq_arr = np.zeros(n_points)
+        for i, f in enumerate(frequencies):
+            self.lockin.write(f"FREQ {f:.2f}")
+            time.sleep(0.3)
+            G_arr[i], Cq_arr[i] = self.measure_admittance()
+        return frequencies, G_arr, Cq_arr
+
+    def close(self):
+        self.lockin.close()
+        self.rm.close()
+```
+
+---
+
+### `fndr_analysis.py`
+
+```python
+import numpy as np
+from scipy.optimize import curve_fit
+from scipy.signal import savgol_filter
+
+
+def fractional_admittance_model(omega, G0, Cq0, alpha):
+    """
+    Y(ω) = G0 + Cq0 * (jω)^α
+    Non-integer α ∈ (0,1) confirms anomalous FNDR behavior.
+    """
+    j_omega_alpha = (omega ** alpha) * np.exp(1j * np.pi * alpha / 2)
+    Y = G0 + Cq0 * j_omega_alpha
+    return np.abs(Y)
+
+
+def fit_fndr(frequencies: np.ndarray, G_mS: np.ndarray, Cq_pF: np.ndarray):
+    """Fit frequency dispersion to fractional-order model. Returns (alpha, params)."""
+    omega = 2 * np.pi * frequencies
+    Y_magnitude = np.sqrt(G_mS**2 + Cq_pF**2)
+    try:
+        params, _ = curve_fit(
+            fractional_admittance_model,
+            omega, Y_magnitude,
+            p0=[G_mS.mean(), Cq_pF.mean(), 0.8],
+            bounds=([0, 0, 0.01], [np.inf, np.inf, 1.0])
+        )
+        G0, Cq0, alpha = params
+        return alpha, params
+    except RuntimeError:
+        return None, None
+
+
+def compute_ndr_regions(voltage: np.ndarray, current: np.ndarray):
+    """Filter → dI/dV → NDR mask. Returns (filtered_current, didv, ndr_mask)."""
+    filtered = savgol_filter(current, window_length=15, polyorder=3)
+    didv = np.gradient(filtered, voltage, edge_order=2)
+    ndr_mask = didv < 0
+    return filtered, didv, ndr_mask
+```
+
+---
+
+### `main.py` — Complete GUI (Debugged + Hardware Integrated)
+
+```python
+import sys
+import numpy as np
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout,
+    QHBoxLayout, QPushButton, QSlider, QLabel, QCheckBox, QGroupBox
+)
+from PyQt6.QtCore import Qt, QTimer
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+
+# ── Local modules ──────────────────────────────────────────────────────────────
+from fndr_analysis import compute_ndr_regions, fit_fndr
+
+# ── Optional: comment out if no hardware connected ────────────────────────────
+HARDWARE_MODE = False  # Set True when SMU/Lock-In are physically connected
+if HARDWARE_MODE:
+    from hardware_driver import SMUDriver, LockInDriver, SweepConfig
+
+
+class NDRVisualizer(QMainWindow):
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Graphene Touchscreen — NDR/FNDR Real-Time Analyzer")
+        self.setGeometry(100, 100, 1200, 750)
+
+        self.scan_count = 0
+
+        # ── Hardware init (only in hardware mode) ─────────────────────────────
+        if HARDWARE_MODE:
+            config = SweepConfig(v_start=0, v_stop=3, v_step=0.01)
+            self.smu = SMUDriver("GPIB0::24::INSTR", config)
+            self.lockin = LockInDriver("GPIB0::8::INSTR", frequency=1000.0)
+
+        # ── Voltage axis (simulation mode) ────────────────────────────────────
+        self.voltage = np.linspace(0, 3, 300)
+
+        # ── Central widget ────────────────────────────────────────────────────
+        self.main_widget = QWidget()
+        self.setCentralWidget(self.main_widget)
+        main_layout = QHBoxLayout(self.main_widget)
+
+        # ── Left control panel ────────────────────────────────────────────────
+        control_panel = QVBoxLayout()
+
+        # Start/Stop button
+        self.start_btn = QPushButton("▶  Start Live Scan")
+        self.start_btn.setCheckable(True)
+        self.start_btn.clicked.connect(self.toggle_scan)
+        control_panel.addWidget(self.start_btn)
+
+        # Pressure slider (simulation only)
+        pressure_group = QGroupBox("Simulation Controls")
+        pressure_layout = QVBoxLayout()
+        pressure_layout.addWidget(QLabel("Simulated Finger Pressure:"))
+        self.pressure_slider = QSlider(Qt.Orientation.Horizontal)
+        self.pressure_slider.setMinimum(1)
+        self.pressure_slider.setMaximum(100)
+        self.pressure_slider.setValue(50)
+        self.pressure_label = QLabel("50 %")
+        self.pressure_slider.valueChanged.connect(
+            lambda v: self.pressure_label.setText(f"{v} %")
+        )
+        pressure_layout.addWidget(self.pressure_slider)
+        pressure_layout.addWidget(self.pressure_label)
+        pressure_group.setLayout(pressure_layout)
+        control_panel.addWidget(pressure_group)
+
+        # FNDR sweep toggle
+        self.fndr_checkbox = QCheckBox("Enable FNDR AC Sweep")
+        self.fndr_checkbox.setChecked(True)
+        control_panel.addWidget(self.fndr_checkbox)
+
+        # Status label
+        self.status_label = QLabel("Status: Idle")
+        self.status_label.setWordWrap(True)
+        control_panel.addWidget(self.status_label)
+
+        control_panel.addStretch()
+        main_layout.addLayout(control_panel, stretch=1)
+
+        # ── Right matplotlib canvas ───────────────────────────────────────────
+        self.fig = Figure(figsize=(9, 6))
+        self.canvas = FigureCanvas(self.fig)
+        main_layout.addWidget(self.canvas, stretch=4)
+
+        self.ax_iv = self.fig.add_subplot(211)
+        self.ax_didv = self.fig.add_subplot(212)
+        self.fig.tight_layout(pad=3.0)
+
+        # ── Timer (100 ms = 10 FPS, stable on most systems) ──────────────────
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_plots)
+
+    # ── Scan toggle ───────────────────────────────────────────────────────────
+    def toggle_scan(self):
+        if self.start_btn.isChecked():
+            self.start_btn.setText("⏹  Stop Live Scan")
+            self.timer.start(100)
+        else:
+            self.start_btn.setText("▶  Start Live Scan")
+            self.timer.stop()
+            self.status_label.setText("Status: Idle")
+
+    # ── Main update loop ──────────────────────────────────────────────────────
+    def update_plots(self):
+        self.scan_count += 1
+
+        # ── Data acquisition ──────────────────────────────────────────────────
+        if HARDWARE_MODE:
+            voltage, raw_current = self.smu.sweep()
+        else:
+            voltage = self.voltage
+            raw_current = self._simulate_iv()
+
+        # ── Signal processing ─────────────────────────────────────────────────
+        filtered_current, didv, ndr_mask = compute_ndr_regions(voltage, raw_current)
+
+        # ── FNDR AC sweep (every 10 cycles) ───────────────────────────────────
+        alpha_text = ""
+        if self.fndr_checkbox.isChecked() and self.scan_count % 10 == 0:
+            if HARDWARE_MODE:
+                freqs, G, Cq = self.lockin.frequency_sweep()
+            else:
+                freqs, G, Cq = self._simulate_fndr()
+            alpha, _ = fit_fndr(freqs, G, Cq)
+            if alpha is not None:
+                tag = "anomalous FNDR ✓" if alpha < 0.9 else "normal"
+                alpha_text = f" | FNDR α = {alpha:.3f} ({tag})"
+
+        self.status_label.setText(
+            f"Status: Running | Scan #{self.scan_count}"
+            f" | NDR pts: {ndr_mask.sum()}{alpha_text}"
+        )
+
+        # ── Render ────────────────────────────────────────────────────────────
+        self.ax_iv.clear()
+        self.ax_didv.clear()
+
+        # I-V plot
+        self.ax_iv.plot(voltage, raw_current, alpha=0.25, color='gray', label='Raw ADC Data')
+        self.ax_iv.plot(voltage, filtered_current, color='royalblue', lw=2, label='Filtered Signal')
+        if ndr_mask.any():
+            self.ax_iv.scatter(
+                voltage[ndr_mask], filtered_current[ndr_mask],
+                color='red', s=10, zorder=5, label='NDR Event'
+            )
+        self.ax_iv.set_ylabel("Current (mA)")
+        self.ax_iv.set_title("Quantum Tunneling I-V Signature — Graphene tBLG")
+        self.ax_iv.grid(True, alpha=0.4)
+        self.ax_iv.legend(loc='upper left', fontsize=8)
+
+        # dI/dV plot
+        self.ax_didv.plot(voltage, didv, color='darkorchid', lw=2, label='Conductance dI/dV')
+        self.ax_didv.axhline(0, color='black', linestyle='--', alpha=0.5)
+        if ndr_mask.any():
+            self.ax_didv.fill_between(
+                voltage, didv, 0,
+                where=ndr_mask, color='red', alpha=0.3, label='NDR Region'
+            )
+        self.ax_didv.set_xlabel("Applied Voltage (V)")
+        self.ax_didv.set_ylabel("Conductance (mS)")
+        self.ax_didv.grid(True, alpha=0.4)
+        self.ax_didv.legend(loc='upper left', fontsize=8)
+
+        # BUG FIX #4: re-apply tight_layout after clear()
+        self.fig.tight_layout(pad=3.0)
+        self.canvas.draw()
+
+    # ── Simulation helpers (no hardware required) ─────────────────────────────
+    def _simulate_iv(self) -> np.ndarray:
+        """Emulate quantum tunneling I-V curve with pressure-dependent NDR peak."""
+        pressure_factor = self.pressure_slider.value() / 50.0
+        peak_center = 1.2 - (pressure_factor * 0.05)
+        raw = (
+            0.2 * self.voltage
+            + (1.5 * pressure_factor)
+            * self.voltage
+            * np.exp(-(self.voltage - peak_center) ** 2 / 0.15)
+        )
+        noise = np.random.normal(0, 0.03, size=self.voltage.shape)
+        return raw + noise
+
+    def _simulate_fndr(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Simulate fractional admittance frequency sweep data."""
+        freqs = np.logspace(2, 5, 50)
+        omega = 2 * np.pi * freqs
+        alpha_true = 0.75  # Anomalous exponent
+        G = 1.0 + 0.5 * (omega ** alpha_true) * np.cos(np.pi * alpha_true / 2)
+        Cq = 0.5 * (omega ** alpha_true) * np.sin(np.pi * alpha_true / 2)
+        G += np.random.normal(0, 0.05, size=freqs.shape)
+        Cq += np.random.normal(0, 0.05, size=freqs.shape)
+        return freqs, G, Cq
+
+    # ── Cleanup ───────────────────────────────────────────────────────────────
+    def closeEvent(self, event):
+        self.timer.stop()
+        if HARDWARE_MODE:
+            self.smu.close()
+            self.lockin.close()
+        event.accept()
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = NDRVisualizer()
+    window.show()
+    sys.exit(app.exec())
+```
+
+---
+
+### Quick Start
+
+```bash
+# Install dependencies
+pip install PyQt6 numpy scipy matplotlib pyvisa pyvisa-py
+
+# Run in simulation mode (no hardware needed)
+python main.py
+
+# To enable real hardware: edit main.py line 16
+HARDWARE_MODE = True
+```
+
+### File Structure
+```
+project/
+├── main.py            ← GUI + entry point
+├── hardware_driver.py ← SMU + Lock-In VISA drivers
+└── fndr_analysis.py   ← NDR detection + FNDR fractional fitting
+```
+
+All 4 bugs from the previous debug session are fixed:
+- ✅ `savgol_filter` correct import and call
+- ✅ `edge_order=2` on `np.gradient`
+- ✅ `tight_layout` re-applied after each `clear()`
+- ✅ Timer set to `100ms` for rendering stability

@@ -1,0 +1,163 @@
+Aquí tiene el diseño de la Interfaz Gráfica de Usuario (GUI) interactiva utilizando PyQt6 (la biblioteca estándar industrial más robusta para interfaces científicas en Python) [sky.com], seguida de la consolidación e integración de todo el proyecto técnico traducido al inglés.
+## Diseño de la GUI con PyQt6 y Matplotlib
+Este script crea una ventana de instrumentación profesional en tiempo real. Incluye un botón para iniciar el escaneo de la pantalla táctil de grafeno, controles deslizantes para simular el cambio de presión del dedo (que altera la respuesta cuántica del sensor) y gráficos dinámicos integrados.
+
+import sysimport numpy as npfrom PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSlider, QLabelfrom PyQt6.QtCore import Qt, QTimerfrom matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvasfrom matplotlib.figure import Figurefrom scipy.signal import savitzky_golay
+class NDRVisualizer(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Graphene Touchscreen - NDR/FNDR Real-Time Analyzer")
+        self.setGeometry(100, 100, 1000, 700)
+
+        # Main Layout Setup
+        self.main_widget = QWidget()
+        self.setCentralWidget(self.main_widget)
+        main_layout = QHBoxLayout(self.main_widget)
+
+        # Left Control Panel
+        control_panel = QVBoxLayout()
+        self.start_btn = QPushButton("Start Live Scan")
+        self.start_btn.setCheckable(True)
+        self.start_btn.clicked.connect(self.toggle_scan)
+        control_panel.addWidget(self.start_btn)
+
+        # Finger Pressure Simulation Slider
+        control_panel.addWidget(QLabel("Simulated Finger Pressure:"))
+        self.pressure_slider = QSlider(Qt.Orientation.Horizontal)
+        self.pressure_slider.setMinimum(1)
+        self.pressure_slider.setMaximum(100)
+        self.pressure_slider.setValue(50)
+        control_panel.addWidget(self.pressure_slider)
+        
+        control_panel.addStretch()
+        main_layout.addLayout(control_panel, stretch=1)
+
+        # Right Graphics Panel (Matplotlib Canvas)
+        self.fig = Figure(figsize=(8, 6))
+        self.canvas = FigureCanvas(self.fig)
+        main_layout.addWidget(self.canvas, stretch=4)
+
+        # Subplots configuration
+        self.ax_iv = self.fig.add_subplot(211)
+        self.ax_didv = self.fig.add_subplot(212)
+        self.fig.tight_layout()
+
+        # Timer for data stream emulation (50ms interval)
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_plots)
+        
+        # Hardware Sweep Data Definition
+        self.voltage = np.linspace(0, 3, 300)
+
+    def toggle_scan(self):
+        if self.start_btn.isChecked():
+            self.start_btn.setText("Stop Live Scan")
+            self.timer.start(50)
+        else:
+            self.start_btn.setText("Start Live Scan")
+            self.timer.stop()
+
+    def update_plots(self):
+        # 1. Acquire current finger pressure scale factor
+        pressure_factor = self.pressure_slider.value() / 50.0
+
+        # 2. Emulate quantum tunneling I-V curve governed by pressure
+        # Peak location shifts slightly based on local graphene lattice strain
+        peak_center = 1.2 - (pressure_factor * 0.05)
+        raw_current = 0.2 * self.voltage + (1.5 * pressure_factor) * self.voltage * np.exp(-(self.voltage - peak_center)**2 / 0.15)
+        noise = np.random.normal(0, 0.03, size=self.voltage.shape)
+        measured_current = raw_current + noise
+
+        # 3. Apply Savitzky-Golay filter to clean Graphene EMI/thermal noise
+        filtered_current = savitzky_golay(measured_current, window_length=15, polyorder=3)
+
+        # 4. Calculate Differential Conductance (dI/dV)
+        didv = np.gradient(filtered_current, self.voltage)
+
+        # 5. Locate active NDR regions (where dI/dV < 0)
+        ndr_indices = np.where(didv < 0)[0]
+
+        # 6. Render Data to GUI Graphics View
+        self.ax_iv.clear()
+        self.ax_didv.clear()
+
+        # Plot I-V
+        self.ax_iv.plot(self.voltage, measured_current, alpha=0.2, color='gray', label='Raw ADC Data')
+        self.ax_iv.plot(self.voltage, filtered_current, color='blue', lw=2, label='Filtered Graphene Signal')
+        if len(ndr_indices) > 0:
+            self.ax_iv.scatter(self.voltage[ndr_indices], filtered_current[ndr_indices], color='red', s=10, zorder=5, label='NDR Event')
+        self.ax_iv.set_ylabel("Current (mA)")
+        self.ax_iv.set_title("Quantum Tunneling I-V Signature")
+        self.ax_iv.grid(True)
+        self.ax_iv.legend(loc='upper left')
+
+        # Plot dI/dV (Conductance)
+        self.ax_didv.plot(self.voltage, didv, color='purple', lw=2, label='Conductance (dI/dV)')
+        self.ax_didv.axhline(0, color='black', linestyle='--', alpha=0.5)
+        if len(ndr_indices) > 0:
+            self.ax_didv.fill_between(self.voltage, didv, 0, where=(didv < 0), color='red', alpha=0.3, label='NDR Region')
+        self.ax_didv.set_xlabel("Applied Voltage (V)")
+        self.ax_didv.set_ylabel("Conductance (mS)")
+        self.ax_didv.grid(True)
+        self.ax_didv.legend(loc='upper left')
+
+        self.canvas.draw()
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = NDRVisualizer()
+    window.show()
+    sys.exit(app.exec())
+
+------------------------------
+## Consolidated System Engineering Blueprint (English Documentation)## 1. Fundamental Physical Correction
+It is physically impossible to change the molecular chirality of cholesterol in the entire human body by touching a capacitive screen. Molecular chirality is a fixed structural parameter defined by its 8 asymmetric carbon centers.
+Instead, by adding a graphene layer to the screen, we pivot the experiment into a quantum-mechanical touch sensor. The system generates Negative Differential Resistance (NDR) and Fractional Negative Differential Resistance (FNDR) locally through mechanical strain and resonant electron tunneling.
+## 2. Physical Sensor Architecture
+To capture localized NDR, the screen is engineered as a macro-matrix of microscopic Molecular Tunneling Junctions (MTJ) distributed across touch pixels:
+
+    [ Human Finger / Applied Mechanical Force ]
+======================================================
+  1. Protective Overlayer (Ultra-thin Hexagonal Boron Nitride or Polymer)
+  2. Twisted Bilayer Graphene - tBLG (Top Flexible Work Electrode)
+  3. Quantum Tunneling Barrier (Self-assembled Lipid/Cholesterol Monolayer, ~2-3 nm)
+  4. Indium Tin Oxide - ITO Grid (Bottom Fixed Counter Electrode)
+======================================================
+    [ Glass Substrate / Display TFT Array Matrix ]
+
+
+* Graphene Selection: Twisted Bilayer Graphene (tBLG) set near the "magic angle" ($1.1^\circ$) is ideal. Mechanical compression modifies the interlayer distance and local moiré lattice parameters. This shifts the flat-band electronic density of states, triggering an abrupt phase transition and strong NDR signatures at low activation voltages.
+
+## 3. Hardware Measuring Circuit & Stability Criteria
+
+  +------------------ Source Measure Unit (SMU) -------------------+
+
+  |                                                                |
+  |   [ AC+DC Ramp Generator ] ---> ( Rs ) ---> [ Graphene Pixel ] |
+  |                                      |            (Device)     |
+  |                                      v              |          |
+  |                             [ Transimpedance ]     v          |
+  |                             [ Amplifier - TIA ] --->(GND)      |
+  |                                      |                         |
+  +--------------------------------------|-------------------------+
+                                         v
+                            [ High-Speed ADC Converter ]
+
+To read the NDR region stably without entering uncontrolled high-frequency self-oscillations, the system instrumentation must meet the strict DC stability criterion:
+$$R_s > \left\vert{} -R_{NDR} \right\vert{}$$ 
+Where $R_s$ is a precise series load resistor, and $\left\vert{} -R_{NDR} \right\vert{}$ is the absolute peak value of the device's negative differential resistance.
+## 4. Software Analysis Pipeline (FNDR Processing)
+
+   1. DC Sweep Analysis: The application filters the micro-ampere level raw data with a Savitzky-Golay filter to strip out display EMI matrix noise. It computes the first numerical derivative ($\frac{dI}{dV}$). A verified NDR zone is declared whenever the differential conductance drops below zero ($\frac{dI}{dV} < 0$).
+   2. AC Fractional (FNDR) Analysis: To isolate the Fractional component caused by the quantum capacitance delays of graphene, an AC perturbation signal ($\tilde{v} = V_{0}\sin(\omega t)$) is superimposed over the DC ramp. The software runs a Fast Fourier Transform (FFT) or digital lock-in algorithm on the output current stream to resolve the complex admittance vector:
+   $$Y(\omega) = G(\omega) + j\omega C_q$$ 
+   FNDR is mathematically extracted by fitting the frequency dispersion curves to anomalous fractional-order models (non-integer power-law exponents), mapping capacitive phase delays across the sensor layout.
+
+------------------------------
+## Next Operational Steps
+To advance this engineering prototype, you will need to:
+
+   1. Install dependencies via terminal: pip install PyQt6 numpy scipy matplotlib
+   2. Connect your target data acquisition hardware (DAQ / Lock-In Amp) to the script using libraries like pyvisa or nidaqmx.
+
+Would you like help with modelling the fractional-order calculus equations for FNDR or writing the hardware driver integration code next?
+
